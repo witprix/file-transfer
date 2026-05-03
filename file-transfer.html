@@ -3,175 +3,192 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Robust WiFi Transfer</title>
+    <title>Persistent WiFi Transfer</title>
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <script src="https://unpkg.com/html5-qrcode"></script>
     <style>
-        :root { --primary: #007bff; --success: #28a745; --bg: #f4f7f6; }
-        body { font-family: -apple-system, system-ui, sans-serif; background: var(--bg); display: flex; justify-content: center; padding: 20px; margin: 0; }
-        .card { background: white; padding: 24px; border-radius: 16px; box-shadow: 0 8px 30px rgba(0,0,0,0.08); width: 100%; max-width: 400px; text-align: center; }
-        #qrcode { margin: 20px auto; background: white; padding: 10px; display: inline-block; border: 1px solid #eee; }
+        :root { --primary: #007bff; --success: #28a745; --danger: #dc3545; --bg: #f8f9fa; }
+        body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); display: flex; justify-content: center; padding: 20px; margin: 0; }
+        .card { background: white; padding: 24px; border-radius: 20px; box-shadow: 0 10px 40px rgba(0,0,0,0.1); width: 100%; max-width: 420px; text-align: center; }
+        #qrcode { margin: 20px auto; padding: 15px; border: 1px solid #eee; border-radius: 12px; display: inline-block; }
         #reader { width: 100%; border-radius: 12px; overflow: hidden; margin: 10px 0; background: #000; }
-        .progress-container { width: 100%; background: #eee; border-radius: 10px; margin: 20px 0; height: 10px; display: none; overflow: hidden; }
-        #progressBar { width: 0%; height: 100%; background: var(--success); transition: width 0.2s; }
-        button { width: 100%; padding: 14px; margin: 8px 0; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: opacity 0.2s; }
-        .btn-scan { background: var(--primary); color: white; }
-        .btn-send { background: var(--success); color: white; display: none; }
-        .status { font-size: 0.85rem; color: #666; margin-top: 12px; min-height: 1.2em; }
+        .progress-container { width: 100%; background: #e9ecef; border-radius: 10px; margin: 20px 0; height: 12px; display: none; overflow: hidden; }
+        #progressBar { width: 0%; height: 100%; background: var(--success); transition: width 0.1s linear; }
+        button { width: 100%; padding: 14px; margin: 8px 0; border: none; border-radius: 10px; font-weight: 600; cursor: pointer; font-size: 1rem; }
+        .btn-primary { background: var(--primary); color: white; }
+        .btn-danger { background: var(--danger); color: white; display: none; }
+        .btn-success { background: var(--success); color: white; display: none; }
+        .status-badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 0.8rem; background: #eee; margin-bottom: 10px; }
         .hidden { display: none; }
     </style>
 </head>
 <body>
 
 <div class="card">
-    <h2 style="margin-top:0">WiFi Transfer</h2>
+    <div id="statusBadge" class="status-badge">Connecting to Network...</div>
     
     <div id="setupView">
         <div id="qrcode"></div>
-        <p style="font-size: 0.9em; color: #444;">Scan this QR on the other phone<br>or</p>
-        <button class="btn-scan" onclick="startScanner()">Scan Friend's QR</button>
+        <p style="color: #666; font-size: 0.9rem;">Scan to connect phones</p>
+        <button class="btn-primary" onclick="startScanner()">Scan QR Code</button>
     </div>
 
     <div id="scanView" class="hidden">
         <div id="reader"></div>
-        <button style="background:#666; color:white" onclick="stopScanner()">Cancel</button>
+        <button style="background:#6c757d; color:white" onclick="stopScanner()">Cancel</button>
     </div>
 
     <div id="transferView" class="hidden">
-        <input type="file" id="fileInput" style="margin-bottom: 10px;">
-        <button class="btn-send" id="sendBtn" style="display:block">Send File</button>
+        <p id="peerInfo" style="font-weight: bold; margin-bottom: 5px;"></p>
+        <input type="file" id="fileInput" style="margin: 15px 0;">
+        <button class="btn-success" id="sendBtn" style="display:block">Start Transfer</button>
         <div class="progress-container" id="pContainer"><div id="progressBar"></div></div>
+        <button class="btn-danger" id="disconnectBtn" style="display:block">Disconnect Session</button>
     </div>
-
-    <div id="status" class="status">Initializing PeerJS...</div>
 </div>
 
 <script>
-    const CHUNK_SIZE = 64 * 1024; // 64KB chunks for stability
-    let peer, conn, fileReader;
-    const statusEl = document.getElementById('status');
-    const progressEl = document.getElementById('progressBar');
-    const pContainer = document.getElementById('pContainer');
-    const html5QrCode = new Html5Qrcode("reader");
+    const CHUNK_SIZE = 16384 * 4; // 64KB
+    let peer, conn, wakeLock = null;
+    let heartbeatInterval;
 
-    // 1. Initialize Peer
+    // 1. Peer Setup with STUN for NAT Traversal
     peer = new Peer({
-        debug: 1,
-        config: {'iceServers': [{ 'urls': 'stun:stun.l.google.com:19302' }]}
+        config: {'iceServers': [{ 'urls': 'stun:stun.l.google.com:19302' }]},
+        debug: 1
     });
 
     peer.on('open', (id) => {
-        statusEl.innerText = "Ready to connect";
+        updateStatus("Ready: Share QR");
         new QRCode(document.getElementById("qrcode"), { text: id, width: 180, height: 180 });
     });
 
-    peer.on('error', (err) => {
-        statusEl.innerText = "Error: " + err.type;
-        console.error(err);
+    // 2. Handle Incoming Connections
+    peer.on('connection', (incoming) => {
+        if (conn) conn.close(); // Only one active session
+        conn = incoming;
+        setupConnection();
     });
 
-    // 2. Handle Incoming Connections (Receiver)
-    peer.on('connection', (incomingConn) => {
-        conn = incomingConn;
-        initConnection();
-    });
+    function setupConnection() {
+        conn.on('open', () => {
+            updateStatus("Connected & Secured", "var(--success)", "white");
+            document.getElementById('setupView').classList.add('hidden');
+            document.getElementById('transferView').classList.remove('hidden');
+            startHeartbeat();
+        });
 
-    function initConnection() {
-        document.getElementById('setupView').classList.add('hidden');
-        document.getElementById('transferView').classList.remove('hidden');
-        statusEl.innerText = "Connected to Peer";
-
-        conn.on('data', (data) => {
-            if (data.type === 'metadata') {
-                window.incomingFile = {
-                    name: data.name,
-                    size: data.size,
-                    type: data.mime,
-                    buffer: [],
-                    receivedSize: 0
-                };
-                pContainer.style.display = 'block';
-                statusEl.innerText = "Receiving: " + data.name;
-            } else if (data.type === 'chunk') {
-                window.incomingFile.buffer.push(data.chunk);
-                window.incomingFile.receivedSize += data.chunk.byteLength;
-                
-                const percent = (window.incomingFile.receivedSize / window.incomingFile.size) * 100;
-                progressEl.style.width = percent + "%";
-
-                if (window.incomingFile.receivedSize >= window.incomingFile.size) {
-                    finalizeDownload();
-                }
-            }
+        conn.on('data', handleData);
+        
+        conn.on('close', () => {
+            alert("Peer disconnected");
+            location.reload();
         });
     }
 
-    function finalizeDownload() {
-        const blob = new Blob(window.incomingFile.buffer, { type: window.incomingFile.type });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = window.incomingFile.name;
-        a.click();
-        statusEl.innerText = "Transfer Complete!";
-        pContainer.style.display = 'none';
+    // 3. Keep-Alive Heartbeat (Prevents Timeout)
+    function startHeartbeat() {
+        heartbeatInterval = setInterval(() => {
+            if (conn && conn.open) conn.send({ type: 'ping' });
+        }, 5000);
     }
 
-    // 3. Sender Logic
-    async function startScanner() {
-        document.getElementById('setupView').classList.add('hidden');
-        document.getElementById('scanView').classList.remove('hidden');
+    // 4. Wake Lock (Prevents Screen Lock Interruption)
+    async function requestWakeLock() {
         try {
-            await html5QrCode.start({ facingMode: "environment" }, { fps: 10, qrbox: 250 }, (id) => {
-                stopScanner();
-                conn = peer.connect(id, { reliable: true });
-                initConnection();
-            });
-        } catch (err) {
-            statusEl.innerText = "Camera Error: " + err;
+            if ('wakeLock' in navigator) {
+                wakeLock = await navigator.wakeLock.request('screen');
+            }
+        } catch (err) { console.error(`${err.name}, ${err.message}`); }
+    }
+
+    function releaseWakeLock() {
+        if (wakeLock) {
+            wakeLock.release();
+            wakeLock = null;
         }
     }
 
-    function stopScanner() {
-        html5QrCode.stop().then(() => {
-            document.getElementById('scanView').classList.add('hidden');
-            document.getElementById('setupView').classList.remove('hidden');
-        });
-    }
-
-    document.getElementById('sendBtn').onclick = () => {
+    // 5. Transfer Logic
+    document.getElementById('sendBtn').onclick = async () => {
         const file = document.getElementById('fileInput').files[0];
-        if (!file) return alert("Select file!");
+        if (!file) return;
 
-        pContainer.style.display = 'block';
+        await requestWakeLock(); // Keep phone awake
+        document.getElementById('pContainer').style.display = 'block';
         conn.send({ type: 'metadata', name: file.name, size: file.size, mime: file.type });
 
         let offset = 0;
-        fileReader = new FileReader();
+        const reader = new FileReader();
 
-        fileReader.onload = (e) => {
+        reader.onload = (e) => {
             conn.send({ type: 'chunk', chunk: e.target.result });
             offset += e.target.result.byteLength;
-            
-            const percent = (offset / file.size) * 100;
-            progressEl.style.width = percent + "%";
-
-            if (offset < file.size) {
-                readNextChunk();
-            } else {
-                statusEl.innerText = "File Sent Successfully!";
+            updateProgress(offset, file.size);
+            if (offset < file.size) readNext();
+            else {
+                updateStatus("Transfer Complete");
+                releaseWakeLock();
             }
         };
 
-        const readNextChunk = () => {
-            const slice = file.slice(offset, offset + CHUNK_SIZE);
-            fileReader.readAsArrayBuffer(slice);
-        };
-
-        readNextChunk();
+        const readNext = () => reader.readAsArrayBuffer(file.slice(offset, offset + CHUNK_SIZE));
+        readNext();
     };
-</script>
 
+    function handleData(data) {
+        if (data.type === 'ping') return;
+        if (data.type === 'metadata') {
+            window.activeFile = { name: data.name, size: data.size, type: data.mime, chunks: [], received: 0 };
+            document.getElementById('pContainer').style.display = 'block';
+            requestWakeLock();
+        } else if (data.type === 'chunk') {
+            window.activeFile.chunks.push(data.chunk);
+            window.activeFile.received += data.chunk.byteLength;
+            updateProgress(window.activeFile.received, window.activeFile.size);
+            if (window.activeFile.received >= window.activeFile.size) finalizeFile();
+        }
+    }
+
+    function finalizeFile() {
+        const blob = new Blob(window.activeFile.chunks, { type: window.activeFile.type });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = window.activeFile.name;
+        a.click();
+        updateStatus("File Received!");
+        releaseWakeLock();
+    }
+
+    // UI Helpers
+    function updateStatus(text, bg = "#eee", color = "#333") {
+        const b = document.getElementById('statusBadge');
+        b.innerText = text; b.style.background = bg; b.style.color = color;
+    }
+
+    function updateProgress(done, total) {
+        document.getElementById('progressBar').style.width = (done / total * 100) + "%";
+    }
+
+    document.getElementById('disconnectBtn').onclick = () => {
+        if (confirm("Disconnect session?")) {
+            if (conn) conn.close();
+            location.reload();
+        }
+    };
+
+    // QR Scanner
+    async function startScanner() {
+        document.getElementById('setupView').classList.add('hidden');
+        document.getElementById('scanView').classList.remove('hidden');
+        await html5QrCode.start({ facingMode: "environment" }, { fps: 10, qrbox: 250 }, (id) => {
+            html5QrCode.stop();
+            document.getElementById('scanView').classList.add('hidden');
+            conn = peer.connect(id, { reliable: true });
+            setupConnection();
+        });
+    }
+</script>
 </body>
 </html>
