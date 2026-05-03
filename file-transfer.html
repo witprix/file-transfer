@@ -3,64 +3,85 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WiFi File Transfer</title>
+    <title>P2P WiFi Transfer</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
-        body { font-family: sans-serif; text-align: center; padding: 20px; background: #f4f4f9; }
-        .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); display: inline-block; width: 90%; max-width: 400px; }
-        button { background: #007bff; color: white; border: none; padding: 12px 20px; border-radius: 5px; cursor: pointer; margin-top: 10px; width: 100%; }
-        input[type="file"] { margin: 20px 0; }
-        #status { margin-top: 20px; color: #555; font-size: 0.9em; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f0f2f5; }
+        .container { background: white; padding: 2rem; border-radius: 15px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); width: 350px; text-align: center; }
+        input, button { width: 100%; padding: 12px; margin: 10px 0; border-radius: 8px; border: 1px solid #ddd; box-sizing: border-box; }
+        button { background: #007bff; color: white; border: none; font-weight: bold; cursor: pointer; }
+        button:disabled { background: #ccc; }
+        #peer-id { font-weight: bold; color: #007bff; background: #e7f3ff; padding: 5px; border-radius: 4px; }
+        .status { font-size: 0.85rem; color: #666; margin-top: 10px; }
     </style>
 </head>
 <body>
 
-<div class="card">
-    <h2>WiFi Share</h2>
-    <p>Ensure both phones are on the same WiFi.</p>
+<div class="container">
+    <h2>WiFi File Share</h2>
+    <p>Your ID: <span id="peer-id">Connecting...</span></p>
     
+    <hr>
+    
+    <input type="text" id="remoteId" placeholder="Enter Friend's ID">
     <input type="file" id="fileInput">
     <button id="sendBtn">Send File</button>
-    
-    <div id="status">Ready...</div>
-    <div id="progress"></div>
+
+    <div id="status" class="status">Waiting for connection...</div>
 </div>
 
 <script>
-    const fileInput = document.getElementById('fileInput');
-    const sendBtn = document.getElementById('sendBtn');
-    const status = document.getElementById('status');
+    const peer = new Peer(); // Create a random ID
+    let conn;
 
-    // WebRTC Peer Connection
-    let localConnection;
-    let sendChannel;
+    // Display your ID
+    peer.on('open', (id) => {
+        document.getElementById('peer-id').innerText = id;
+    });
 
-    sendBtn.onclick = () => {
-        const file = fileInput.files[0];
-        if (!file) return alert("Select a file first!");
-
-        status.innerText = "Initializing connection...";
+    // --- SENDER LOGIC ---
+    document.getElementById('sendBtn').onclick = () => {
+        const remoteId = document.getElementById('remoteId').value;
+        const file = document.getElementById('fileInput').files[0];
         
-        // Setup WebRTC
-        localConnection = new RTCPeerConnection();
-        sendChannel = localConnection.createDataChannel("fileTransfer");
-        
-        sendChannel.onopen = () => {
-            status.innerText = "Sending: " + file.name;
-            sendFile(file);
-        };
+        if (!remoteId || !file) return alert("Enter ID and select a file!");
 
-        // In a real app, you would exchange 'SDP Offers' here via a signaling server
-        console.log("Offer created. Connect the second phone to this peer ID.");
+        document.getElementById('status').innerText = "Connecting...";
+        conn = peer.connect(remoteId);
+
+        conn.on('open', () => {
+            document.getElementById('status').innerText = "Sending " + file.name + "...";
+            conn.send({
+                file: file,
+                fileName: file.name,
+                fileType: file.type
+            });
+        });
     };
 
-    function sendFile(file) {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            sendChannel.send(e.target.result);
-            status.innerText = "Transfer Complete!";
-        };
-        reader.readAsArrayBuffer(file);
-    }
+    // --- RECEIVER LOGIC ---
+    peer.on('connection', (connection) => {
+        conn = connection;
+        document.getElementById('status').innerText = "Incoming transfer...";
+
+        conn.on('data', (data) => {
+            document.getElementById('status').innerText = "Received: " + data.fileName;
+            
+            // Convert received data to a downloadable link
+            const blob = new Blob([data.file], { type: data.fileType });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = data.fileName;
+            a.click();
+        });
+    });
+
+    peer.on('error', (err) => {
+        console.error(err);
+        alert("Connection Error: " + err.type);
+    });
 </script>
+
 </body>
 </html>
