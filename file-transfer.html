@@ -3,125 +3,173 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>QR WiFi Transfer</title>
+    <title>Robust WiFi Transfer</title>
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <script src="https://unpkg.com/html5-qrcode"></script>
     <style>
-        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; background: #f8f9fa; }
-        .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); width: 100%; max-width: 400px; text-align: center; }
-        #qrcode { margin: 20px auto; display: flex; justify-content: center; }
-        #reader { width: 100%; border-radius: 8px; overflow: hidden; margin-top: 10px; }
-        button { width: 100%; padding: 12px; margin: 10px 0; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; }
-        .btn-send { background: #28a745; color: white; }
-        .btn-scan { background: #007bff; color: white; }
-        input[type="file"] { margin: 10px 0; }
+        :root { --primary: #007bff; --success: #28a745; --bg: #f4f7f6; }
+        body { font-family: -apple-system, system-ui, sans-serif; background: var(--bg); display: flex; justify-content: center; padding: 20px; margin: 0; }
+        .card { background: white; padding: 24px; border-radius: 16px; box-shadow: 0 8px 30px rgba(0,0,0,0.08); width: 100%; max-width: 400px; text-align: center; }
+        #qrcode { margin: 20px auto; background: white; padding: 10px; display: inline-block; border: 1px solid #eee; }
+        #reader { width: 100%; border-radius: 12px; overflow: hidden; margin: 10px 0; background: #000; }
+        .progress-container { width: 100%; background: #eee; border-radius: 10px; margin: 20px 0; height: 10px; display: none; overflow: hidden; }
+        #progressBar { width: 0%; height: 100%; background: var(--success); transition: width 0.2s; }
+        button { width: 100%; padding: 14px; margin: 8px 0; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: opacity 0.2s; }
+        .btn-scan { background: var(--primary); color: white; }
+        .btn-send { background: var(--success); color: white; display: none; }
+        .status { font-size: 0.85rem; color: #666; margin-top: 12px; min-height: 1.2em; }
         .hidden { display: none; }
     </style>
 </head>
 <body>
 
 <div class="card">
-    <h2>WiFi Share</h2>
+    <h2 style="margin-top:0">WiFi Transfer</h2>
     
-    <div id="receiveView">
-        <p>Show this QR to the sender:</p>
+    <div id="setupView">
         <div id="qrcode"></div>
-        <p>ID: <span id="my-id">...</span></p>
-        <button class="btn-scan" onclick="showScanner()">Scan a QR instead</button>
+        <p style="font-size: 0.9em; color: #444;">Scan this QR on the other phone<br>or</p>
+        <button class="btn-scan" onclick="startScanner()">Scan Friend's QR</button>
     </div>
 
     <div id="scanView" class="hidden">
         <div id="reader"></div>
-        <button onclick="hideScanner()">Back</button>
+        <button style="background:#666; color:white" onclick="stopScanner()">Cancel</button>
     </div>
 
-    <hr>
-    <div id="transferArea" class="hidden">
-        <input type="file" id="fileInput">
-        <button class="btn-send" id="sendBtn">Transfer File</button>
+    <div id="transferView" class="hidden">
+        <input type="file" id="fileInput" style="margin-bottom: 10px;">
+        <button class="btn-send" id="sendBtn" style="display:block">Send File</button>
+        <div class="progress-container" id="pContainer"><div id="progressBar"></div></div>
     </div>
-    
-    <div id="status" style="margin-top:15px; font-size: 0.9em; color: #666;">Ready</div>
+
+    <div id="status" class="status">Initializing PeerJS...</div>
 </div>
 
 <script>
-    const peer = new Peer();
-    let conn;
+    const CHUNK_SIZE = 64 * 1024; // 64KB chunks for stability
+    let peer, conn, fileReader;
+    const statusEl = document.getElementById('status');
+    const progressEl = document.getElementById('progressBar');
+    const pContainer = document.getElementById('pContainer');
     const html5QrCode = new Html5Qrcode("reader");
 
-    // 1. Initialize Peer and Generate QR
-    peer.on('open', (id) => {
-        document.getElementById('my-id').innerText = id;
-        new QRCode(document.getElementById("qrcode"), {
-            text: id,
-            width: 160,
-            height: 160
-        });
+    // 1. Initialize Peer
+    peer = new Peer({
+        debug: 1,
+        config: {'iceServers': [{ 'urls': 'stun:stun.l.google.com:19302' }]}
     });
 
-    // 2. Navigation Logic
-    function showScanner() {
-        document.getElementById('receiveView').classList.add('hidden');
-        document.getElementById('scanView').classList.remove('hidden');
-        
-        html5QrCode.start({ facingMode: "environment" }, { fps: 10, qrbox: 250 },
-            (decodedText) => {
-                connectToPeer(decodedText);
-                hideScanner();
-            }
-        );
-    }
+    peer.on('open', (id) => {
+        statusEl.innerText = "Ready to connect";
+        new QRCode(document.getElementById("qrcode"), { text: id, width: 180, height: 180 });
+    });
 
-    function hideScanner() {
-        html5QrCode.stop();
-        document.getElementById('scanView').classList.add('hidden');
-        document.getElementById('receiveView').classList.remove('hidden');
-    }
+    peer.on('error', (err) => {
+        statusEl.innerText = "Error: " + err.type;
+        console.error(err);
+    });
 
-    // 3. Connection Logic
-    function connectToPeer(remoteId) {
-        document.getElementById('status').innerText = "Connecting to peer...";
-        document.getElementById('transferArea').classList.remove('hidden');
-        conn = peer.connect(remoteId);
-        setupConnectionListeners();
-    }
-
-    // Handle Incoming Connections (Receiver)
+    // 2. Handle Incoming Connections (Receiver)
     peer.on('connection', (incomingConn) => {
         conn = incomingConn;
-        document.getElementById('status').innerText = "Connected! Waiting for file...";
-        setupConnectionListeners();
+        initConnection();
     });
 
-    function setupConnectionListeners() {
-        conn.on('open', () => {
-            document.getElementById('status').innerText = "Connected & Encrypted";
-            document.getElementById('transferArea').classList.remove('hidden');
-        });
+    function initConnection() {
+        document.getElementById('setupView').classList.add('hidden');
+        document.getElementById('transferView').classList.remove('hidden');
+        statusEl.innerText = "Connected to Peer";
 
         conn.on('data', (data) => {
-            const blob = new Blob([data.file], { type: data.fileType });
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = data.fileName;
-            a.click();
-            document.getElementById('status').innerText = "File Received: " + data.fileName;
+            if (data.type === 'metadata') {
+                window.incomingFile = {
+                    name: data.name,
+                    size: data.size,
+                    type: data.mime,
+                    buffer: [],
+                    receivedSize: 0
+                };
+                pContainer.style.display = 'block';
+                statusEl.innerText = "Receiving: " + data.name;
+            } else if (data.type === 'chunk') {
+                window.incomingFile.buffer.push(data.chunk);
+                window.incomingFile.receivedSize += data.chunk.byteLength;
+                
+                const percent = (window.incomingFile.receivedSize / window.incomingFile.size) * 100;
+                progressEl.style.width = percent + "%";
+
+                if (window.incomingFile.receivedSize >= window.incomingFile.size) {
+                    finalizeDownload();
+                }
+            }
         });
     }
 
-    // 4. Send File Logic
+    function finalizeDownload() {
+        const blob = new Blob(window.incomingFile.buffer, { type: window.incomingFile.type });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = window.incomingFile.name;
+        a.click();
+        statusEl.innerText = "Transfer Complete!";
+        pContainer.style.display = 'none';
+    }
+
+    // 3. Sender Logic
+    async function startScanner() {
+        document.getElementById('setupView').classList.add('hidden');
+        document.getElementById('scanView').classList.remove('hidden');
+        try {
+            await html5QrCode.start({ facingMode: "environment" }, { fps: 10, qrbox: 250 }, (id) => {
+                stopScanner();
+                conn = peer.connect(id, { reliable: true });
+                initConnection();
+            });
+        } catch (err) {
+            statusEl.innerText = "Camera Error: " + err;
+        }
+    }
+
+    function stopScanner() {
+        html5QrCode.stop().then(() => {
+            document.getElementById('scanView').classList.add('hidden');
+            document.getElementById('setupView').classList.remove('hidden');
+        });
+    }
+
     document.getElementById('sendBtn').onclick = () => {
         const file = document.getElementById('fileInput').files[0];
-        if (!file || !conn) return alert("Select a file or connect first!");
+        if (!file) return alert("Select file!");
 
-        document.getElementById('status').innerText = "Sending...";
-        conn.send({
-            file: file,
-            fileName: file.name,
-            fileType: file.type
-        });
+        pContainer.style.display = 'block';
+        conn.send({ type: 'metadata', name: file.name, size: file.size, mime: file.type });
+
+        let offset = 0;
+        fileReader = new FileReader();
+
+        fileReader.onload = (e) => {
+            conn.send({ type: 'chunk', chunk: e.target.result });
+            offset += e.target.result.byteLength;
+            
+            const percent = (offset / file.size) * 100;
+            progressEl.style.width = percent + "%";
+
+            if (offset < file.size) {
+                readNextChunk();
+            } else {
+                statusEl.innerText = "File Sent Successfully!";
+            }
+        };
+
+        const readNextChunk = () => {
+            const slice = file.slice(offset, offset + CHUNK_SIZE);
+            fileReader.readAsArrayBuffer(slice);
+        };
+
+        readNextChunk();
     };
 </script>
 
