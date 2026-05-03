@@ -3,84 +3,126 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>P2P WiFi Transfer</title>
+    <title>QR WiFi Transfer</title>
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <script src="https://unpkg.com/html5-qrcode"></script>
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f0f2f5; }
-        .container { background: white; padding: 2rem; border-radius: 15px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); width: 350px; text-align: center; }
-        input, button { width: 100%; padding: 12px; margin: 10px 0; border-radius: 8px; border: 1px solid #ddd; box-sizing: border-box; }
-        button { background: #007bff; color: white; border: none; font-weight: bold; cursor: pointer; }
-        button:disabled { background: #ccc; }
-        #peer-id { font-weight: bold; color: #007bff; background: #e7f3ff; padding: 5px; border-radius: 4px; }
-        .status { font-size: 0.85rem; color: #666; margin-top: 10px; }
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; background: #f8f9fa; }
+        .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); width: 100%; max-width: 400px; text-align: center; }
+        #qrcode { margin: 20px auto; display: flex; justify-content: center; }
+        #reader { width: 100%; border-radius: 8px; overflow: hidden; margin-top: 10px; }
+        button { width: 100%; padding: 12px; margin: 10px 0; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; }
+        .btn-send { background: #28a745; color: white; }
+        .btn-scan { background: #007bff; color: white; }
+        input[type="file"] { margin: 10px 0; }
+        .hidden { display: none; }
     </style>
 </head>
 <body>
 
-<div class="container">
-    <h2>WiFi File Share</h2>
-    <p>Your ID: <span id="peer-id">Connecting...</span></p>
+<div class="card">
+    <h2>WiFi Share</h2>
     
-    <hr>
-    
-    <input type="text" id="remoteId" placeholder="Enter Friend's ID">
-    <input type="file" id="fileInput">
-    <button id="sendBtn">Send File</button>
+    <div id="receiveView">
+        <p>Show this QR to the sender:</p>
+        <div id="qrcode"></div>
+        <p>ID: <span id="my-id">...</span></p>
+        <button class="btn-scan" onclick="showScanner()">Scan a QR instead</button>
+    </div>
 
-    <div id="status" class="status">Waiting for connection...</div>
+    <div id="scanView" class="hidden">
+        <div id="reader"></div>
+        <button onclick="hideScanner()">Back</button>
+    </div>
+
+    <hr>
+    <div id="transferArea" class="hidden">
+        <input type="file" id="fileInput">
+        <button class="btn-send" id="sendBtn">Transfer File</button>
+    </div>
+    
+    <div id="status" style="margin-top:15px; font-size: 0.9em; color: #666;">Ready</div>
 </div>
 
 <script>
-    const peer = new Peer(); // Create a random ID
+    const peer = new Peer();
     let conn;
+    const html5QrCode = new Html5Qrcode("reader");
 
-    // Display your ID
+    // 1. Initialize Peer and Generate QR
     peer.on('open', (id) => {
-        document.getElementById('peer-id').innerText = id;
+        document.getElementById('my-id').innerText = id;
+        new QRCode(document.getElementById("qrcode"), {
+            text: id,
+            width: 160,
+            height: 160
+        });
     });
 
-    // --- SENDER LOGIC ---
-    document.getElementById('sendBtn').onclick = () => {
-        const remoteId = document.getElementById('remoteId').value;
-        const file = document.getElementById('fileInput').files[0];
+    // 2. Navigation Logic
+    function showScanner() {
+        document.getElementById('receiveView').classList.add('hidden');
+        document.getElementById('scanView').classList.remove('hidden');
         
-        if (!remoteId || !file) return alert("Enter ID and select a file!");
+        html5QrCode.start({ facingMode: "environment" }, { fps: 10, qrbox: 250 },
+            (decodedText) => {
+                connectToPeer(decodedText);
+                hideScanner();
+            }
+        );
+    }
 
-        document.getElementById('status').innerText = "Connecting...";
+    function hideScanner() {
+        html5QrCode.stop();
+        document.getElementById('scanView').classList.add('hidden');
+        document.getElementById('receiveView').classList.remove('hidden');
+    }
+
+    // 3. Connection Logic
+    function connectToPeer(remoteId) {
+        document.getElementById('status').innerText = "Connecting to peer...";
+        document.getElementById('transferArea').classList.remove('hidden');
         conn = peer.connect(remoteId);
+        setupConnectionListeners();
+    }
 
+    // Handle Incoming Connections (Receiver)
+    peer.on('connection', (incomingConn) => {
+        conn = incomingConn;
+        document.getElementById('status').innerText = "Connected! Waiting for file...";
+        setupConnectionListeners();
+    });
+
+    function setupConnectionListeners() {
         conn.on('open', () => {
-            document.getElementById('status').innerText = "Sending " + file.name + "...";
-            conn.send({
-                file: file,
-                fileName: file.name,
-                fileType: file.type
-            });
+            document.getElementById('status').innerText = "Connected & Encrypted";
+            document.getElementById('transferArea').classList.remove('hidden');
         });
-    };
-
-    // --- RECEIVER LOGIC ---
-    peer.on('connection', (connection) => {
-        conn = connection;
-        document.getElementById('status').innerText = "Incoming transfer...";
 
         conn.on('data', (data) => {
-            document.getElementById('status').innerText = "Received: " + data.fileName;
-            
-            // Convert received data to a downloadable link
             const blob = new Blob([data.file], { type: data.fileType });
             const url = window.URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
             a.download = data.fileName;
             a.click();
+            document.getElementById('status').innerText = "File Received: " + data.fileName;
         });
-    });
+    }
 
-    peer.on('error', (err) => {
-        console.error(err);
-        alert("Connection Error: " + err.type);
-    });
+    // 4. Send File Logic
+    document.getElementById('sendBtn').onclick = () => {
+        const file = document.getElementById('fileInput').files[0];
+        if (!file || !conn) return alert("Select a file or connect first!");
+
+        document.getElementById('status').innerText = "Sending...";
+        conn.send({
+            file: file,
+            fileName: file.name,
+            fileType: file.type
+        });
+    };
 </script>
 
 </body>
