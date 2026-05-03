@@ -52,6 +52,9 @@
     const CHUNK_SIZE = 16384 * 4; // 64KB
     let peer, conn, wakeLock = null;
     let heartbeatInterval;
+    
+    // Initialize Scanner Instance
+    const html5QrCode = new Html5Qrcode("reader");
 
     // 1. Peer Setup with STUN for NAT Traversal
     peer = new Peer({
@@ -66,7 +69,7 @@
 
     // 2. Handle Incoming Connections
     peer.on('connection', (incoming) => {
-        if (conn) conn.close(); // Only one active session
+        if (conn) conn.close(); 
         conn = incoming;
         setupConnection();
     });
@@ -75,6 +78,7 @@
         conn.on('open', () => {
             updateStatus("Connected & Secured", "var(--success)", "white");
             document.getElementById('setupView').classList.add('hidden');
+            document.getElementById('scanView').classList.add('hidden');
             document.getElementById('transferView').classList.remove('hidden');
             startHeartbeat();
         });
@@ -87,26 +91,47 @@
         });
     }
 
-    // 3. Keep-Alive Heartbeat (Prevents Timeout)
+    // 3. Keep-Alive Heartbeat
     function startHeartbeat() {
         heartbeatInterval = setInterval(() => {
             if (conn && conn.open) conn.send({ type: 'ping' });
         }, 5000);
     }
 
-    // 4. Wake Lock (Prevents Screen Lock Interruption)
-    async function requestWakeLock() {
+    // 4. QR Scanner Functions
+    async function startScanner() {
+        document.getElementById('setupView').classList.add('hidden');
+        document.getElementById('scanView').classList.remove('hidden');
+        
         try {
-            if ('wakeLock' in navigator) {
-                wakeLock = await navigator.wakeLock.request('screen');
-            }
-        } catch (err) { console.error(`${err.name}, ${err.message}`); }
+            await html5QrCode.start(
+                { facingMode: "environment" }, 
+                { fps: 10, qrbox: { width: 250, height: 250 } },
+                (decodedText) => {
+                    // QR Code detected
+                    stopScanner();
+                    updateStatus("Connecting...");
+                    conn = peer.connect(decodedText, { reliable: true });
+                    setupConnection();
+                },
+                (errorMessage) => { /* ignore scan errors */ }
+            );
+        } catch (err) {
+            console.error("Scanner Error:", err);
+            alert("Camera error: " + err);
+            stopScanner();
+        }
     }
 
-    function releaseWakeLock() {
-        if (wakeLock) {
-            wakeLock.release();
-            wakeLock = null;
+    async function stopScanner() {
+        try {
+            if (html5QrCode.isScanning) {
+                await html5QrCode.stop();
+            }
+            document.getElementById('scanView').classList.add('hidden');
+            document.getElementById('setupView').classList.remove('hidden');
+        } catch (err) {
+            console.error(err);
         }
     }
 
@@ -115,7 +140,8 @@
         const file = document.getElementById('fileInput').files[0];
         if (!file) return;
 
-        await requestWakeLock(); // Keep phone awake
+        if (window.activeFile) return alert("Transfer in progress");
+
         document.getElementById('pContainer').style.display = 'block';
         conn.send({ type: 'metadata', name: file.name, size: file.size, mime: file.type });
 
@@ -127,10 +153,7 @@
             offset += e.target.result.byteLength;
             updateProgress(offset, file.size);
             if (offset < file.size) readNext();
-            else {
-                updateStatus("Transfer Complete");
-                releaseWakeLock();
-            }
+            else updateStatus("Transfer Complete");
         };
 
         const readNext = () => reader.readAsArrayBuffer(file.slice(offset, offset + CHUNK_SIZE));
@@ -142,7 +165,7 @@
         if (data.type === 'metadata') {
             window.activeFile = { name: data.name, size: data.size, type: data.mime, chunks: [], received: 0 };
             document.getElementById('pContainer').style.display = 'block';
-            requestWakeLock();
+            updateStatus("Receiving file...");
         } else if (data.type === 'chunk') {
             window.activeFile.chunks.push(data.chunk);
             window.activeFile.received += data.chunk.byteLength;
@@ -158,7 +181,7 @@
         a.download = window.activeFile.name;
         a.click();
         updateStatus("File Received!");
-        releaseWakeLock();
+        window.activeFile = null;
     }
 
     // UI Helpers
@@ -177,18 +200,6 @@
             location.reload();
         }
     };
-
-    // QR Scanner
-    async function startScanner() {
-        document.getElementById('setupView').classList.add('hidden');
-        document.getElementById('scanView').classList.remove('hidden');
-        await html5QrCode.start({ facingMode: "environment" }, { fps: 10, qrbox: 250 }, (id) => {
-            html5QrCode.stop();
-            document.getElementById('scanView').classList.add('hidden');
-            conn = peer.connect(id, { reliable: true });
-            setupConnection();
-        });
-    }
 </script>
 </body>
 </html>
