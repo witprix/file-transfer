@@ -18,9 +18,9 @@
         #qrcode { margin: 20px auto; padding: 15px; border: 1px solid #eee; border-radius: 12px; display: inline-block; }
         #reader { width: 100%; border-radius: 12px; overflow: hidden; margin: 10px 0; background: #000; }
         
-        /* Modernized Progress & Metrics Dashboard */
         .progress-container { width: 100%; background: #e9ecef; border-radius: 10px; margin: 15px 0 5px 0; height: 12px; display: none; overflow: hidden; }
         #progressBar { width: 0%; height: 100%; background: var(--success); transition: width 0.1s linear; }
+        
         .metrics-box { display: none; text-align: left; background: #f1f3f5; padding: 12px; border-radius: 10px; margin: 10px 0; font-size: 0.85rem; color: #495057; }
         .metrics-row { display: flex; justify-content: space-between; margin-bottom: 4px; }
         .metrics-row:last-child { margin-bottom: 0; }
@@ -71,14 +71,14 @@
         
         <button class="btn-success" id="sendBtn" style="display:block">Start Transfer</button>
         
-        <!-- Dashboard Display Components -->
         <div class="progress-container" id="pContainer"><div id="progressBar"></div></div>
         
         <div class="metrics-box" id="metricsBox">
             <div class="metrics-row"><span>Items:</span><span class="metrics-val" id="mFiles">0 / 0</span></div>
             <div class="metrics-row"><span>Data Size:</span><span class="metrics-val" id="mData">0 MB / 0 MB</span></div>
-            <div class="metrics-row"><span>Speed:</span><span class="metrics-val" id="mSpeed">0 MB/s</span></div>
-            <div class="metrics-row"><span>Time Left:</span><span class="metrics-val" id="mTime">--:--</span></div>
+            <div class="metrics-row"><span>Transfer Speed:</span><span class="metrics-val" id="mSpeed">0 MB/s</span></div>
+            <div class="metrics-row"><span>Est. Time Left:</span><span class="metrics-val" id="mTime">--:--</span></div>
+            <div class="metrics-row"><span>Network Latency:</span><span class="metrics-val" id="mLatency">Measuring...</span></div>
         </div>
 
         <button class="btn-danger" id="disconnectBtn" style="display:block">Disconnect Session</button>
@@ -93,6 +93,12 @@
     let pendingTransfer = [];
     let isZippedTransfer = false;
     let totalFilesCount = 0;
+    
+    // Smooth Estimation Metrics Global Variables
+    let smoothedSpeed = 0;
+    const ALPHA = 0.15; // Speed damping filter weight factor (0.15 = 15% weight to newest data)
+    let lastOffset = 0;
+    let lastTime = 0;
     
     const html5QrCode = new Html5Qrcode("reader");
 
@@ -129,10 +135,13 @@
         });
     }
 
+    // Keep-Alive Heartbeat + Network Latency Tracking
     function startHeartbeat() {
         heartbeatInterval = setInterval(() => {
-            if (conn && conn.open) conn.send({ type: 'ping' });
-        }, 5000);
+            if (conn && conn.open) {
+                conn.send({ type: 'ping', sentAt: Date.now() });
+            }
+        }, 3000);
     }
 
     async function startScanner() {
@@ -162,7 +171,6 @@
         document.getElementById('setupView').classList.remove('hidden');
     }
 
-    // Input Parsing UI updates
     document.getElementById('fileInput').onchange = (e) => {
         if(!e.target.files.length) return;
         pendingTransfer = Array.from(e.target.files);
@@ -185,7 +193,6 @@
         document.getElementById('selectionText').innerText = `Selected Folder: ${folderName} (${totalFilesCount} files)`;
     };
 
-    // Helper to format values elegantly
     function formatBytes(bytes) {
         if (bytes === 0) return '0 Bytes';
         const k = 1024;
@@ -194,7 +201,7 @@
         return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
     }
 
-    // Sender Pipeline
+    // Sender Execution Pipeline
     document.getElementById('sendBtn').onclick = async () => {
         if (pendingTransfer.length === 0) return alert("Please select a file or folder first.");
         if (window.activeFile) return alert("A transfer is already in progress.");
@@ -236,46 +243,56 @@
         });
 
         let offset = 0;
-        let startTime = Date.now();
+        smoothedSpeed = 0;
+        lastOffset = 0;
+        lastTime = Date.now();
+        
         const reader = new FileReader();
 
         reader.onload = (e) => {
             conn.send({ type: 'chunk', chunk: e.target.result });
             offset += e.target.result.byteLength;
             
-            // Calculate Performance Metrics dynamically
-            const elapsed = (Date.now() - startTime) / 1000; // seconds
-            const speed = elapsed > 0 ? (offset / elapsed) : 0; // bytes per sec
-            const remainingBytes = fileToSend.size - offset;
-            const timeLeft = speed > 0 ? Math.ceil(remainingBytes / speed) : 0;
+            const now = Date.now();
+            const timeDelta = (now - lastTime) / 1000; // in seconds
             
-            // Format time display (MM:SS)
+            if (timeDelta >= 0.1 || offset === fileToSend.size) {
+                const bytesDelta = offset - lastOffset;
+                const instantSpeed = bytesDelta / timeDelta;
+                
+                // Exponential Moving Average smoothing filter implementation
+                smoothedSpeed = smoothedSpeed === 0 ? instantSpeed : (ALPHA * instantSpeed) + ((1 - ALPHA) * smoothedSpeed);
+                
+                lastOffset = offset;
+                lastTime = now;
+            }
+
+            const remainingBytes = fileToSend.size - offset;
+            const timeLeft = smoothedSpeed > 0 ? Math.ceil(remainingBytes / smoothedSpeed) : 0;
+            
             const min = Math.floor(timeLeft / 60);
             const sec = timeLeft % 60;
-            const timeString = speed > 0 ? `${min}:${sec < 10 ? '0' : ''}${sec} left` : '--:--';
+            const timeString = offset === fileToSend.size ? "Finished" : (smoothedSpeed > 0 ? `${min}:${sec < 10 ? '0' : ''}${sec} left` : '--:--');
 
-            // Send analytical status metadata package to syncing receiver
             conn.send({
                 type: 'metrics',
                 done: offset,
                 total: fileToSend.size,
-                speed: speed,
+                speed: smoothedSpeed,
                 timeStr: timeString,
                 count: totalFilesCount
             });
 
-            // Update Sender Local UI
             updateProgress(offset, fileToSend.size);
             document.getElementById('mFiles').innerText = isZippedTransfer ? `${totalFilesCount} Files Packed` : `1 File`;
             document.getElementById('mData').innerText = `${formatBytes(offset)} / ${formatBytes(fileToSend.size)}`;
-            document.getElementById('mSpeed').innerText = `${formatBytes(speed)}/s`;
+            document.getElementById('mSpeed').innerText = `${formatBytes(smoothedSpeed)}/s`;
             document.getElementById('mTime').innerText = timeString;
 
             if (offset < fileToSend.size) {
                 readNext();
             } else {
                 updateStatus("Transfer Complete", "var(--success)", "white");
-                document.getElementById('mTime').innerText = "Finished";
                 pendingTransfer = [];
                 document.getElementById('selectionText').innerText = "No item selected";
                 document.getElementById('fileInput').value = "";
@@ -287,9 +304,20 @@
         readNext();
     };
 
-    // Receiver Real-time Sync Engine
+    // Receiver Real-time Processing Engine
     function handleData(data) {
-        if (data.type === 'ping') return;
+        if (data.type === 'ping') {
+            // Echo ping back instantly with original timestamp
+            conn.send({ type: 'pong', sentAt: data.sentAt });
+            return;
+        }
+        
+        if (data.type === 'pong') {
+            // Calculate Round Trip Time Network Latency
+            const rtt = Date.now() - data.sentAt;
+            document.getElementById('mLatency').innerText = `${rtt} ms`;
+            return;
+        }
         
         if (data.type === 'metadata') {
             window.activeFile = { name: data.name, size: data.size, type: data.mime, chunks: [], received: 0, count: data.itemCount };
@@ -300,7 +328,6 @@
             window.activeFile.received += data.chunk.byteLength;
             if (window.activeFile.received >= window.activeFile.size) finalizeFile();
         } else if (data.type === 'metrics') {
-            // Update receiver interface mirroring calculations
             updateProgress(data.done, data.total);
             document.getElementById('mFiles').innerText = data.count > 1 ? `Extracts ${data.count} Files` : `1 File`;
             document.getElementById('mData').innerText = `${formatBytes(data.done)} / ${formatBytes(data.total)}`;
@@ -314,7 +341,6 @@
         const downloadUrl = URL.createObjectURL(blob);
         const fileName = window.activeFile.name;
         
-        // Dynamic generation to safely bypass cross-browser permission locks
         const a = document.createElement('a');
         a.href = downloadUrl;
         a.download = fileName;
