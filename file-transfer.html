@@ -4,24 +4,30 @@
     <meta charset="UTF-8">
     <title>Robust Batch Transfer</title>
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
-    <script src="https://unpkg.com/html5-qrcode"></script> <!-- Restored Library -->
+    <script src="https://unpkg.com/html5-qrcode"></script>
     <style>
         body { font-family: sans-serif; padding: 20px; background: #f4f4f9; display: flex; justify-content: center; }
         .card { background: white; padding: 24px; border-radius: 15px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); width: 100%; max-width: 400px; text-align: center; }
+        #qrcode { margin: 20px auto; padding: 10px; border: 1px solid #ddd; display: inline-block; }
         .progress-bar { height: 12px; background: #eee; border-radius: 6px; overflow: hidden; margin: 15px 0; display: none; }
         #bar { height: 100%; background: #28a745; width: 0%; transition: width 0.1s; }
         button { width: 100%; padding: 12px; margin: 8px 0; border: none; border-radius: 8px; background: #007bff; color: white; cursor: pointer; }
         #reader { width: 100%; height: 250px; background: #000; margin-top: 10px; display: none; }
     </style>
+    <!-- Include QRCode library to display the ID -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 </head>
 <body>
 
 <div class="card">
     <h3 id="status">Connecting...</h3>
+    
+    <!-- QR Code Displayed for the Host -->
     <div id="qrcode"></div>
+    
+    <!-- Scanner displayed only when needed -->
     <div id="reader"></div>
     
-    <!-- Restored UI Controls -->
     <button id="scanBtn" onclick="startScanner()">Scan QR Code</button>
     <input type="file" id="folderInput" webkitdirectory directory multiple style="display:none">
     <button onclick="document.getElementById('folderInput').click()">Select Folder</button>
@@ -37,11 +43,20 @@
     const MAX_BUFFER = 1024 * 1024 * 4; 
     const html5QrCode = new Html5Qrcode("reader");
 
-    peer.on('open', id => document.getElementById('status').innerText = "Your ID: " + id);
-    peer.on('connection', c => { conn = c; setupConnection(); });
+    // Initialize ID and QR Code on load
+    peer.on('open', id => {
+        document.getElementById('status').innerText = "Share this QR Code";
+        new QRCode(document.getElementById("qrcode"), { text: id, width: 150, height: 150 });
+    });
 
-    // --- RESTORED SCANNER LOGIC ---
+    peer.on('connection', c => { 
+        conn = c; 
+        document.getElementById('status').innerText = "Connected!";
+        setupConnection(); 
+    });
+
     function startScanner() {
+        document.getElementById('qrcode').style.display = 'none'; // Hide ID while scanning
         document.getElementById('reader').style.display = 'block';
         html5QrCode.start({ facingMode: "environment" }, { fps: 10, qrbox: 250 }, 
             (decodedText) => {
@@ -54,12 +69,11 @@
     function stopScanner() {
         html5QrCode.stop();
         document.getElementById('reader').style.display = 'none';
+        document.getElementById('qrcode').style.display = 'block';
     }
-    // ------------------------------
 
     function setupConnection() {
         document.getElementById('status').innerText = "Connected!";
-        conn.on('data', data => { if(data === 'ACK') window.ready = true; });
     }
 
     document.getElementById('folderInput').onchange = e => fileQueue = Array.from(e.target.files);
