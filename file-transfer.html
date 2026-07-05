@@ -52,13 +52,12 @@
     <div id="transferView" class="hidden">
         <p id="peerInfo" style="font-weight: bold; margin-bottom: 5px;"></p>
         
-        <!-- Hidden Inputs for File/Folder Selection -->
-        <input type="file" id="fileInput" class="hidden">
+        <!-- Hidden Inputs: One for files/multiple files, one for whole directories -->
+        <input type="file" id="fileInput" multiple class="hidden">
         <input type="file" id="folderInput" webkitdirectory directory multiple class="hidden">
         
-        <!-- Custom UI for Selection -->
         <div class="btn-group">
-            <button class="btn-secondary" onclick="document.getElementById('fileInput').click()">📄 Select File</button>
+            <button class="btn-secondary" onclick="document.getElementById('fileInput').click()">📄 Select File(s)</button>
             <button class="btn-secondary" onclick="document.getElementById('folderInput').click()">📁 Select Folder</button>
         </div>
         
@@ -75,14 +74,12 @@
     let peer, conn, wakeLock = null;
     let heartbeatInterval;
     
-    // Transfer State
-    let pendingTransfer = null;
-    let isFolder = false;
+    // Transfer State Array to handle multiple files or folder contents
+    let pendingTransfer = [];
+    let isZippedTransfer = false;
     
-    // Initialize Scanner Instance
     const html5QrCode = new Html5Qrcode("reader");
 
-    // 1. Peer Setup with STUN for NAT Traversal
     peer = new Peer({
         config: {'iceServers': [{ 'urls': 'stun:stun.l.google.com:19302' }]},
         debug: 1
@@ -93,7 +90,6 @@
         new QRCode(document.getElementById("qrcode"), { text: id, width: 180, height: 180 });
     });
 
-    // 2. Handle Incoming Connections
     peer.on('connection', (incoming) => {
         if (conn) conn.close(); 
         conn = incoming;
@@ -117,14 +113,12 @@
         });
     }
 
-    // 3. Keep-Alive Heartbeat
     function startHeartbeat() {
         heartbeatInterval = setInterval(() => {
             if (conn && conn.open) conn.send({ type: 'ping' });
         }, 5000);
     }
 
-    // 4. QR Scanner Functions
     async function startScanner() {
         document.getElementById('setupView').classList.add('hidden');
         document.getElementById('scanView').classList.remove('hidden');
@@ -139,7 +133,7 @@
                     conn = peer.connect(decodedText, { reliable: true });
                     setupConnection();
                 },
-                (errorMessage) => { /* ignore scan errors */ }
+                (errorMessage) => { /* ignore */ }
             );
         } catch (err) {
             console.error("Scanner Error:", err);
@@ -149,66 +143,69 @@
     }
 
     async function stopScanner() {
-        try {
-            if (html5QrCode.isScanning) {
-                await html5QrCode.stop();
-            }
-            document.getElementById('scanView').classList.add('hidden');
-            document.getElementById('setupView').classList.remove('hidden');
-        } catch (err) {
-            console.error(err);
-        }
+        if (html5QrCode.isScanning) await html5QrCode.stop();
+        document.getElementById('scanView').classList.add('hidden');
+        document.getElementById('setupView').classList.remove('hidden');
     }
 
-    // 5. Input Handlers
+    // Input Handlers
     document.getElementById('fileInput').onchange = (e) => {
         if(!e.target.files.length) return;
-        pendingTransfer = e.target.files[0];
-        isFolder = false;
-        document.getElementById('selectionText').innerText = "Selected File: " + pendingTransfer.name;
+        pendingTransfer = Array.from(e.target.files);
+        
+        if (pendingTransfer.length > 1) {
+            isZippedTransfer = true;
+            document.getElementById('selectionText').innerText = `Selected ${pendingTransfer.length} files (Will be zipped)`;
+        } else {
+            isZippedTransfer = false;
+            document.getElementById('selectionText').innerText = "Selected File: " + pendingTransfer[0].name;
+        }
     };
 
     document.getElementById('folderInput').onchange = (e) => {
         if(!e.target.files.length) return;
-        pendingTransfer = e.target.files; // Store FileList
-        isFolder = true;
+        pendingTransfer = Array.from(e.target.files);
+        isZippedTransfer = true;
+        
         // Extract root folder name
         const folderName = pendingTransfer[0].webkitRelativePath.split('/')[0] || "Selected_Folder";
         document.getElementById('selectionText').innerText = `Selected Folder: ${folderName} (${pendingTransfer.length} files)`;
     };
 
-    // 6. Transfer Logic (Supports both File and Zipped Folder)
+    // Transfer Logic
     document.getElementById('sendBtn').onclick = async () => {
-        if (!pendingTransfer) return alert("Please select a file or folder first.");
+        if (pendingTransfer.length === 0) return alert("Please select a file or folder first.");
         if (window.activeFile) return alert("A transfer is already in progress.");
 
         document.getElementById('pContainer').style.display = 'block';
         let fileToSend;
         let fileName;
 
-        // If it's a folder, Zip it first
-        if (isFolder) {
-            updateStatus("Compressing Folder...", "var(--primary)", "white");
+        // If multiple files or a folder were selected, zip them
+        if (isZippedTransfer) {
+            updateStatus("Compressing...", "var(--primary)", "white");
             const zip = new JSZip();
-            let baseFolderName = pendingTransfer[0].webkitRelativePath.split('/')[0] || "folder";
             
-            // Add all files to JSZip instance retaining structure
+            // Check if items have a relative path (folder upload) or just normal files
+            const isFolderStructure = pendingTransfer[0].webkitRelativePath && pendingTransfer[0].webkitRelativePath.includes('/');
+            const baseName = isFolderStructure ? pendingTransfer[0].webkitRelativePath.split('/')[0] : "Shared_Files";
+            
             for(let i=0; i < pendingTransfer.length; i++) {
                 const f = pendingTransfer[i];
-                zip.file(f.webkitRelativePath, f);
+                // Use relative path to maintain folder structure, otherwise fallback to standard filename
+                const filePath = (isFolderStructure && f.webkitRelativePath) ? f.webkitRelativePath : f.name;
+                zip.file(filePath, f);
             }
             
-            // Generate Zip Blob
             fileToSend = await zip.generateAsync({type:"blob"}, (meta) => {
-                // Update progress bar during zip process
                 updateProgress(meta.percent, 100);
             });
-            fileName = baseFolderName + ".zip";
-            updateProgress(0, 100); // Reset progress for actual network transfer
+            fileName = baseName + ".zip";
+            updateProgress(0, 100); // Reset for actual transfer
         } else {
             // Standard Single File
-            fileToSend = pendingTransfer;
-            fileName = pendingTransfer.name;
+            fileToSend = pendingTransfer[0];
+            fileName = fileToSend.name;
         }
 
         updateStatus("Sending...", "var(--primary)", "white");
@@ -227,8 +224,8 @@
             } else {
                 updateStatus("Transfer Complete", "var(--success)", "white");
                 
-                // Reset Selection UI
-                pendingTransfer = null;
+                // Reset Selection
+                pendingTransfer = [];
                 document.getElementById('selectionText').innerText = "No item selected";
                 document.getElementById('fileInput').value = "";
                 document.getElementById('folderInput').value = "";
@@ -240,7 +237,7 @@
         readNext();
     };
 
-    // 7. Receiver Logic
+    // Receiver Logic
     function handleData(data) {
         if (data.type === 'ping') return;
         if (data.type === 'metadata') {
