@@ -86,8 +86,8 @@
 </div>
 
 <script>
-    // OPTIMIZATION: Increased chunk size to 256KB for lower CPU overhead
-    const CHUNK_SIZE = 16384 * 16; 
+    // FIX: Restored to safe 64KB chunk size to prevent browser-level SCTP limits/crashes
+    const CHUNK_SIZE = 65536; 
     let peer, conn, wakeLock = null;
     let heartbeatInterval;
     
@@ -97,7 +97,7 @@
     
     // Smooth Estimation Metrics Global Variables
     let smoothedSpeed = 0;
-    const ALPHA = 0.15; // Speed damping filter weight factor
+    const ALPHA = 0.15; 
     let lastOffset = 0;
     let lastTime = 0;
     
@@ -136,7 +136,6 @@
         });
     }
 
-    // Keep-Alive Heartbeat + Network Latency Tracking
     function startHeartbeat() {
         heartbeatInterval = setInterval(() => {
             if (conn && conn.open) {
@@ -172,9 +171,7 @@
         document.getElementById('setupView').classList.remove('hidden');
     }
 
-    // --- FIX: Input Reset & Safer Parsing Logic ---
-    
-    // Clear the input value on click so you can re-select the same folder/file
+    // Input Reset & Safer Parsing Logic
     document.getElementById('fileInput').onclick = (e) => { e.target.value = null; };
     document.getElementById('folderInput').onclick = (e) => { e.target.value = null; };
 
@@ -203,7 +200,6 @@
         totalFilesCount = pendingTransfer.length;
         isZippedTransfer = true;
         
-        // Crash-proof folder name extraction
         let folderName = "Selected_Folder";
         if (pendingTransfer[0] && pendingTransfer[0].webkitRelativePath) {
             const pathParts = pendingTransfer[0].webkitRelativePath.split('/');
@@ -214,8 +210,6 @@
         
         document.getElementById('selectionText').innerText = `Selected Folder: ${folderName} (${totalFilesCount} files)`;
     };
-    
-    // ---------------------------------------------
 
     function formatBytes(bytes) {
         if (bytes === 0) return '0 Bytes';
@@ -272,29 +266,29 @@
         lastOffset = 0;
         lastTime = Date.now();
         
+        // Anti-crash variable for garbage collection
+        let chunksSinceYield = 0;
+        
         const reader = new FileReader();
 
         reader.onload = (e) => {
             conn.send({ type: 'chunk', chunk: e.target.result });
             offset += e.target.result.byteLength;
+            chunksSinceYield++;
             
             const now = Date.now();
-            const timeDelta = (now - lastTime) / 1000; // in seconds
+            const timeDelta = (now - lastTime) / 1000; 
             
             if (timeDelta >= 0.1 || offset === fileToSend.size) {
                 const bytesDelta = offset - lastOffset;
                 const instantSpeed = bytesDelta / timeDelta;
-                
-                // Exponential Moving Average smoothing filter implementation
                 smoothedSpeed = smoothedSpeed === 0 ? instantSpeed : (ALPHA * instantSpeed) + ((1 - ALPHA) * smoothedSpeed);
-                
                 lastOffset = offset;
                 lastTime = now;
             }
 
             const remainingBytes = fileToSend.size - offset;
             const timeLeft = smoothedSpeed > 0 ? Math.ceil(remainingBytes / smoothedSpeed) : 0;
-            
             const min = Math.floor(timeLeft / 60);
             const sec = timeLeft % 60;
             const timeString = offset === fileToSend.size ? "Finished" : (smoothedSpeed > 0 ? `${min}:${sec < 10 ? '0' : ''}${sec} left` : '--:--');
@@ -315,23 +309,25 @@
             document.getElementById('mTime').innerText = timeString;
 
             if (offset < fileToSend.size) {
-                // --- OPTIMIZATION: AGGRESSIVE BACKPRESSURE IMPLEMENTATION ---
-                // Keep the pipe full but prevent overflow
-                const MAX_BUFFER = 16 * 1024 * 1024; // 16MB
+                // FIX: Stable 4MB buffer 
+                const MAX_BUFFER = 4 * 1024 * 1024; 
                 
                 const processNextChunk = () => {
-                    // Check if the underlying DataChannel buffer is full
                     if (conn.dataChannel && conn.dataChannel.bufferedAmount > MAX_BUFFER) {
-                        // Buffer is full, check back in just 5ms
-                        setTimeout(processNextChunk, 5);
+                        setTimeout(processNextChunk, 10);
                     } else {
-                        // Buffer has space, read the next chunk
-                        readNext();
+                        // FIX: Yield to the browser's Event Loop every ~30 chunks (~2MB)
+                        // This prevents the "Aw, Snap!" memory crash by allowing Garbage Collection to run mid-transfer.
+                        if (chunksSinceYield > 30) {
+                            chunksSinceYield = 0;
+                            setTimeout(readNext, 1);
+                        } else {
+                            readNext();
+                        }
                     }
                 };
-                
                 processNextChunk();
-                // -----------------------------------------------------------
+                
             } else {
                 updateStatus("Transfer Complete", "var(--success)", "white");
                 pendingTransfer = [];
@@ -348,13 +344,11 @@
     // Receiver Real-time Processing Engine
     function handleData(data) {
         if (data.type === 'ping') {
-            // Echo ping back instantly with original timestamp
             conn.send({ type: 'pong', sentAt: data.sentAt });
             return;
         }
         
         if (data.type === 'pong') {
-            // Calculate Round Trip Time Network Latency
             const rtt = Date.now() - data.sentAt;
             document.getElementById('mLatency').innerText = `${rtt} ms`;
             return;
