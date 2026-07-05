@@ -171,10 +171,18 @@
         document.getElementById('setupView').classList.remove('hidden');
     }
 
+    // --- FIX: Input Reset & Safer Parsing Logic ---
+    
+    // Clear the input value on click so you can re-select the same folder/file
+    document.getElementById('fileInput').onclick = (e) => { e.target.value = null; };
+    document.getElementById('folderInput').onclick = (e) => { e.target.value = null; };
+
     document.getElementById('fileInput').onchange = (e) => {
-        if(!e.target.files.length) return;
+        if(!e.target.files || e.target.files.length === 0) return;
+        
         pendingTransfer = Array.from(e.target.files);
         totalFilesCount = pendingTransfer.length;
+        
         if (totalFilesCount > 1) {
             isZippedTransfer = true;
             document.getElementById('selectionText').innerText = `Selected ${totalFilesCount} files (Will be packed)`;
@@ -185,13 +193,28 @@
     };
 
     document.getElementById('folderInput').onchange = (e) => {
-        if(!e.target.files.length) return;
+        if(!e.target.files || e.target.files.length === 0) {
+            alert("Your browser blocked access to the folder contents. Try using 'Select File(s)' instead.");
+            return;
+        }
+        
         pendingTransfer = Array.from(e.target.files);
         totalFilesCount = pendingTransfer.length;
         isZippedTransfer = true;
-        const folderName = pendingTransfer[0].webkitRelativePath.split('/')[0] || "Selected_Folder";
+        
+        // Crash-proof folder name extraction
+        let folderName = "Selected_Folder";
+        if (pendingTransfer[0] && pendingTransfer[0].webkitRelativePath) {
+            const pathParts = pendingTransfer[0].webkitRelativePath.split('/');
+            if (pathParts.length > 0) {
+                folderName = pathParts[0];
+            }
+        }
+        
         document.getElementById('selectionText').innerText = `Selected Folder: ${folderName} (${totalFilesCount} files)`;
     };
+    
+    // ---------------------------------------------
 
     function formatBytes(bytes) {
         if (bytes === 0) return '0 Bytes';
@@ -214,7 +237,8 @@
             updateStatus("Compressing...", "var(--primary)", "white");
             document.getElementById('mTime').innerText = "Packing entries...";
             const zip = new JSZip();
-            const isFolderStructure = pendingTransfer[0].webkitRelativePath && pendingTransfer[0].webkitRelativePath.includes('/');
+            
+            const isFolderStructure = pendingTransfer[0] && pendingTransfer[0].webkitRelativePath && pendingTransfer[0].webkitRelativePath.includes('/');
             const baseName = isFolderStructure ? pendingTransfer[0].webkitRelativePath.split('/')[0] : "Shared_Files";
             
             for(let i=0; i < pendingTransfer.length; i++) {
@@ -290,7 +314,7 @@
             document.getElementById('mTime').innerText = timeString;
 
             if (offset < fileToSend.size) {
-                // BACKPRESSURE IMPLEMENTATION
+                // --- FIX: BACKPRESSURE IMPLEMENTATION ---
                 // Prevent WebRTC buffer overflow by pausing if buffer > 2MB
                 const MAX_BUFFER = 2 * 1024 * 1024; // 2MB
                 
@@ -306,7 +330,7 @@
                 };
                 
                 processNextChunk();
-                
+                // ----------------------------------------
             } else {
                 updateStatus("Transfer Complete", "var(--success)", "white");
                 pendingTransfer = [];
