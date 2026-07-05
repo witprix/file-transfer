@@ -290,7 +290,23 @@
             document.getElementById('mTime').innerText = timeString;
 
             if (offset < fileToSend.size) {
-                readNext();
+                // BACKPRESSURE IMPLEMENTATION
+                // Prevent WebRTC buffer overflow by pausing if buffer > 2MB
+                const MAX_BUFFER = 2 * 1024 * 1024; // 2MB
+                
+                const processNextChunk = () => {
+                    // Check if the underlying DataChannel buffer is full
+                    if (conn.dataChannel && conn.dataChannel.bufferedAmount > MAX_BUFFER) {
+                        // Buffer is too full, wait 50ms and check again
+                        setTimeout(processNextChunk, 50);
+                    } else {
+                        // Buffer has space, read the next chunk
+                        readNext();
+                    }
+                };
+                
+                processNextChunk();
+                
             } else {
                 updateStatus("Transfer Complete", "var(--success)", "white");
                 pendingTransfer = [];
