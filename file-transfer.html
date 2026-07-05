@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Persistent WiFi Transfer</title>
+    <title>Persistent WiFi Transfer Pro</title>
     
     <!-- External Dependencies -->
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
@@ -86,7 +86,8 @@
 </div>
 
 <script>
-    const CHUNK_SIZE = 16384 * 4; // 64KB
+    // OPTIMIZATION: Increased chunk size to 256KB for lower CPU overhead
+    const CHUNK_SIZE = 16384 * 16; 
     let peer, conn, wakeLock = null;
     let heartbeatInterval;
     
@@ -96,7 +97,7 @@
     
     // Smooth Estimation Metrics Global Variables
     let smoothedSpeed = 0;
-    const ALPHA = 0.15; // Speed damping filter weight factor (0.15 = 15% weight to newest data)
+    const ALPHA = 0.15; // Speed damping filter weight factor
     let lastOffset = 0;
     let lastTime = 0;
     
@@ -314,15 +315,15 @@
             document.getElementById('mTime').innerText = timeString;
 
             if (offset < fileToSend.size) {
-                // --- FIX: BACKPRESSURE IMPLEMENTATION ---
-                // Prevent WebRTC buffer overflow by pausing if buffer > 2MB
-                const MAX_BUFFER = 2 * 1024 * 1024; // 2MB
+                // --- OPTIMIZATION: AGGRESSIVE BACKPRESSURE IMPLEMENTATION ---
+                // Keep the pipe full but prevent overflow
+                const MAX_BUFFER = 16 * 1024 * 1024; // 16MB
                 
                 const processNextChunk = () => {
                     // Check if the underlying DataChannel buffer is full
                     if (conn.dataChannel && conn.dataChannel.bufferedAmount > MAX_BUFFER) {
-                        // Buffer is too full, wait 50ms and check again
-                        setTimeout(processNextChunk, 50);
+                        // Buffer is full, check back in just 5ms
+                        setTimeout(processNextChunk, 5);
                     } else {
                         // Buffer has space, read the next chunk
                         readNext();
@@ -330,7 +331,7 @@
                 };
                 
                 processNextChunk();
-                // ----------------------------------------
+                // -----------------------------------------------------------
             } else {
                 updateStatus("Transfer Complete", "var(--success)", "white");
                 pendingTransfer = [];
