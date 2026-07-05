@@ -254,12 +254,44 @@
 
     function finalizeFile() {
         const blob = new Blob(window.activeFile.chunks, { type: window.activeFile.type });
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = window.activeFile.name;
-        a.click();
+        const downloadUrl = URL.createObjectURL(blob);
+        const fileName = window.activeFile.name;
         
+        // 1. Try to auto-download (Improved method)
+        const a = document.createElement('a');
+        a.href = downloadUrl;
+        a.download = fileName;
+        document.body.appendChild(a); // Browsers require it to be in the DOM
+        a.click();
+        document.body.removeChild(a); // Clean it up
+        
+        // 2. Add a visible fallback button just in case the browser blocked it
         updateStatus("Transfer Received!", "var(--success)", "white");
+        
+        // Clean up previous download buttons if they exist
+        const oldBtn = document.getElementById('manualDownloadBtn');
+        if (oldBtn) oldBtn.remove();
+
+        const transferView = document.getElementById('transferView');
+        const fallbackBtn = document.createElement('button');
+        fallbackBtn.id = 'manualDownloadBtn';
+        fallbackBtn.className = "btn-success";
+        fallbackBtn.style.display = "block";
+        fallbackBtn.style.marginTop = "15px";
+        fallbackBtn.innerText = `💾 Save ${fileName}`;
+        fallbackBtn.onclick = () => {
+            const manualLink = document.createElement('a');
+            manualLink.href = downloadUrl;
+            manualLink.download = fileName;
+            document.body.appendChild(manualLink);
+            manualLink.click();
+            document.body.removeChild(manualLink);
+        };
+        
+        // Add it directly above the disconnect button
+        const disconnectBtn = document.getElementById('disconnectBtn');
+        transferView.insertBefore(fallbackBtn, disconnectBtn);
+
         window.activeFile = null;
         setTimeout(() => { document.getElementById('pContainer').style.display = 'none'; }, 2000);
     }
