@@ -17,8 +17,15 @@
         .card { background: white; padding: 24px; border-radius: 20px; box-shadow: 0 10px 40px rgba(0,0,0,0.1); width: 100%; max-width: 420px; text-align: center; }
         #qrcode { margin: 20px auto; padding: 15px; border: 1px solid #eee; border-radius: 12px; display: inline-block; }
         #reader { width: 100%; border-radius: 12px; overflow: hidden; margin: 10px 0; background: #000; }
-        .progress-container { width: 100%; background: #e9ecef; border-radius: 10px; margin: 20px 0; height: 12px; display: none; overflow: hidden; }
+        
+        /* Modernized Progress & Metrics Dashboard */
+        .progress-container { width: 100%; background: #e9ecef; border-radius: 10px; margin: 15px 0 5px 0; height: 12px; display: none; overflow: hidden; }
         #progressBar { width: 0%; height: 100%; background: var(--success); transition: width 0.1s linear; }
+        .metrics-box { display: none; text-align: left; background: #f1f3f5; padding: 12px; border-radius: 10px; margin: 10px 0; font-size: 0.85rem; color: #495057; }
+        .metrics-row { display: flex; justify-content: space-between; margin-bottom: 4px; }
+        .metrics-row:last-child { margin-bottom: 0; }
+        .metrics-val { font-weight: 600; color: #212529; }
+
         button { width: 100%; padding: 14px; margin: 8px 0; border: none; border-radius: 10px; font-weight: 600; cursor: pointer; font-size: 1rem; transition: opacity 0.2s; }
         button:active { opacity: 0.8; }
         
@@ -52,7 +59,6 @@
     <div id="transferView" class="hidden">
         <p id="peerInfo" style="font-weight: bold; margin-bottom: 5px;"></p>
         
-        <!-- Hidden Inputs: One for files/multiple files, one for whole directories -->
         <input type="file" id="fileInput" multiple class="hidden">
         <input type="file" id="folderInput" webkitdirectory directory multiple class="hidden">
         
@@ -64,7 +70,17 @@
         <p id="selectionText">No item selected</p>
         
         <button class="btn-success" id="sendBtn" style="display:block">Start Transfer</button>
+        
+        <!-- Dashboard Display Components -->
         <div class="progress-container" id="pContainer"><div id="progressBar"></div></div>
+        
+        <div class="metrics-box" id="metricsBox">
+            <div class="metrics-row"><span>Items:</span><span class="metrics-val" id="mFiles">0 / 0</span></div>
+            <div class="metrics-row"><span>Data Size:</span><span class="metrics-val" id="mData">0 MB / 0 MB</span></div>
+            <div class="metrics-row"><span>Speed:</span><span class="metrics-val" id="mSpeed">0 MB/s</span></div>
+            <div class="metrics-row"><span>Time Left:</span><span class="metrics-val" id="mTime">--:--</span></div>
+        </div>
+
         <button class="btn-danger" id="disconnectBtn" style="display:block">Disconnect Session</button>
     </div>
 </div>
@@ -74,9 +90,9 @@
     let peer, conn, wakeLock = null;
     let heartbeatInterval;
     
-    // Transfer State Array to handle multiple files or folder contents
     let pendingTransfer = [];
     let isZippedTransfer = false;
+    let totalFilesCount = 0;
     
     const html5QrCode = new Html5Qrcode("reader");
 
@@ -122,7 +138,6 @@
     async function startScanner() {
         document.getElementById('setupView').classList.add('hidden');
         document.getElementById('scanView').classList.remove('hidden');
-        
         try {
             await html5QrCode.start(
                 { facingMode: "environment" }, 
@@ -133,10 +148,9 @@
                     conn = peer.connect(decodedText, { reliable: true });
                     setupConnection();
                 },
-                (errorMessage) => { /* ignore */ }
+                (errorMessage) => {}
             );
         } catch (err) {
-            console.error("Scanner Error:", err);
             alert("Camera error: " + err);
             stopScanner();
         }
@@ -148,14 +162,14 @@
         document.getElementById('setupView').classList.remove('hidden');
     }
 
-    // Input Handlers
+    // Input Parsing UI updates
     document.getElementById('fileInput').onchange = (e) => {
         if(!e.target.files.length) return;
         pendingTransfer = Array.from(e.target.files);
-        
-        if (pendingTransfer.length > 1) {
+        totalFilesCount = pendingTransfer.length;
+        if (totalFilesCount > 1) {
             isZippedTransfer = true;
-            document.getElementById('selectionText').innerText = `Selected ${pendingTransfer.length} files (Will be zipped)`;
+            document.getElementById('selectionText').innerText = `Selected ${totalFilesCount} files (Will be packed)`;
         } else {
             isZippedTransfer = false;
             document.getElementById('selectionText').innerText = "Selected File: " + pendingTransfer[0].name;
@@ -165,71 +179,107 @@
     document.getElementById('folderInput').onchange = (e) => {
         if(!e.target.files.length) return;
         pendingTransfer = Array.from(e.target.files);
+        totalFilesCount = pendingTransfer.length;
         isZippedTransfer = true;
-        
-        // Extract root folder name
         const folderName = pendingTransfer[0].webkitRelativePath.split('/')[0] || "Selected_Folder";
-        document.getElementById('selectionText').innerText = `Selected Folder: ${folderName} (${pendingTransfer.length} files)`;
+        document.getElementById('selectionText').innerText = `Selected Folder: ${folderName} (${totalFilesCount} files)`;
     };
 
-    // Transfer Logic
+    // Helper to format values elegantly
+    function formatBytes(bytes) {
+        if (bytes === 0) return '0 Bytes';
+        const k = 1024;
+        const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+
+    // Sender Pipeline
     document.getElementById('sendBtn').onclick = async () => {
         if (pendingTransfer.length === 0) return alert("Please select a file or folder first.");
         if (window.activeFile) return alert("A transfer is already in progress.");
 
-        document.getElementById('pContainer').style.display = 'block';
+        showDashboard(true);
         let fileToSend;
         let fileName;
 
-        // If multiple files or a folder were selected, zip them
         if (isZippedTransfer) {
             updateStatus("Compressing...", "var(--primary)", "white");
+            document.getElementById('mTime').innerText = "Packing entries...";
             const zip = new JSZip();
-            
-            // Check if items have a relative path (folder upload) or just normal files
             const isFolderStructure = pendingTransfer[0].webkitRelativePath && pendingTransfer[0].webkitRelativePath.includes('/');
             const baseName = isFolderStructure ? pendingTransfer[0].webkitRelativePath.split('/')[0] : "Shared_Files";
             
             for(let i=0; i < pendingTransfer.length; i++) {
                 const f = pendingTransfer[i];
-                // Use relative path to maintain folder structure, otherwise fallback to standard filename
                 const filePath = (isFolderStructure && f.webkitRelativePath) ? f.webkitRelativePath : f.name;
                 zip.file(filePath, f);
             }
             
             fileToSend = await zip.generateAsync({type:"blob"}, (meta) => {
                 updateProgress(meta.percent, 100);
+                document.getElementById('mFiles').innerText = `${Math.round(meta.percent)}% Packaged`;
             });
             fileName = baseName + ".zip";
-            updateProgress(0, 100); // Reset for actual transfer
         } else {
-            // Standard Single File
             fileToSend = pendingTransfer[0];
             fileName = fileToSend.name;
         }
 
         updateStatus("Sending...", "var(--primary)", "white");
-        conn.send({ type: 'metadata', name: fileName, size: fileToSend.size, mime: fileToSend.type || "application/zip" });
+        conn.send({ 
+            type: 'metadata', 
+            name: fileName, 
+            size: fileToSend.size, 
+            mime: fileToSend.type || "application/zip",
+            itemCount: totalFilesCount 
+        });
 
         let offset = 0;
+        let startTime = Date.now();
         const reader = new FileReader();
 
         reader.onload = (e) => {
             conn.send({ type: 'chunk', chunk: e.target.result });
             offset += e.target.result.byteLength;
-            updateProgress(offset, fileToSend.size);
             
+            // Calculate Performance Metrics dynamically
+            const elapsed = (Date.now() - startTime) / 1000; // seconds
+            const speed = elapsed > 0 ? (offset / elapsed) : 0; // bytes per sec
+            const remainingBytes = fileToSend.size - offset;
+            const timeLeft = speed > 0 ? Math.ceil(remainingBytes / speed) : 0;
+            
+            // Format time display (MM:SS)
+            const min = Math.floor(timeLeft / 60);
+            const sec = timeLeft % 60;
+            const timeString = speed > 0 ? `${min}:${sec < 10 ? '0' : ''}${sec} left` : '--:--';
+
+            // Send analytical status metadata package to syncing receiver
+            conn.send({
+                type: 'metrics',
+                done: offset,
+                total: fileToSend.size,
+                speed: speed,
+                timeStr: timeString,
+                count: totalFilesCount
+            });
+
+            // Update Sender Local UI
+            updateProgress(offset, fileToSend.size);
+            document.getElementById('mFiles').innerText = isZippedTransfer ? `${totalFilesCount} Files Packed` : `1 File`;
+            document.getElementById('mData').innerText = `${formatBytes(offset)} / ${formatBytes(fileToSend.size)}`;
+            document.getElementById('mSpeed').innerText = `${formatBytes(speed)}/s`;
+            document.getElementById('mTime').innerText = timeString;
+
             if (offset < fileToSend.size) {
                 readNext();
             } else {
                 updateStatus("Transfer Complete", "var(--success)", "white");
-                
-                // Reset Selection
+                document.getElementById('mTime').innerText = "Finished";
                 pendingTransfer = [];
                 document.getElementById('selectionText').innerText = "No item selected";
                 document.getElementById('fileInput').value = "";
                 document.getElementById('folderInput').value = "";
-                setTimeout(() => { document.getElementById('pContainer').style.display = 'none'; }, 2000);
             }
         };
 
@@ -237,18 +287,25 @@
         readNext();
     };
 
-    // Receiver Logic
+    // Receiver Real-time Sync Engine
     function handleData(data) {
         if (data.type === 'ping') return;
+        
         if (data.type === 'metadata') {
-            window.activeFile = { name: data.name, size: data.size, type: data.mime, chunks: [], received: 0 };
-            document.getElementById('pContainer').style.display = 'block';
+            window.activeFile = { name: data.name, size: data.size, type: data.mime, chunks: [], received: 0, count: data.itemCount };
+            showDashboard(true);
             updateStatus("Receiving...");
         } else if (data.type === 'chunk') {
             window.activeFile.chunks.push(data.chunk);
             window.activeFile.received += data.chunk.byteLength;
-            updateProgress(window.activeFile.received, window.activeFile.size);
             if (window.activeFile.received >= window.activeFile.size) finalizeFile();
+        } else if (data.type === 'metrics') {
+            // Update receiver interface mirroring calculations
+            updateProgress(data.done, data.total);
+            document.getElementById('mFiles').innerText = data.count > 1 ? `Extracts ${data.count} Files` : `1 File`;
+            document.getElementById('mData').innerText = `${formatBytes(data.done)} / ${formatBytes(data.total)}`;
+            document.getElementById('mSpeed').innerText = `${formatBytes(data.speed)}/s`;
+            document.getElementById('mTime').innerText = data.timeStr;
         }
     }
 
@@ -257,18 +314,17 @@
         const downloadUrl = URL.createObjectURL(blob);
         const fileName = window.activeFile.name;
         
-        // 1. Try to auto-download (Improved method)
+        // Dynamic generation to safely bypass cross-browser permission locks
         const a = document.createElement('a');
         a.href = downloadUrl;
         a.download = fileName;
-        document.body.appendChild(a); // Browsers require it to be in the DOM
+        document.body.appendChild(a);
         a.click();
-        document.body.removeChild(a); // Clean it up
+        document.body.removeChild(a);
         
-        // 2. Add a visible fallback button just in case the browser blocked it
         updateStatus("Transfer Received!", "var(--success)", "white");
+        document.getElementById('mTime').innerText = "Saved";
         
-        // Clean up previous download buttons if they exist
         const oldBtn = document.getElementById('manualDownloadBtn');
         if (oldBtn) oldBtn.remove();
 
@@ -288,15 +344,17 @@
             document.body.removeChild(manualLink);
         };
         
-        // Add it directly above the disconnect button
         const disconnectBtn = document.getElementById('disconnectBtn');
         transferView.insertBefore(fallbackBtn, disconnectBtn);
-
         window.activeFile = null;
-        setTimeout(() => { document.getElementById('pContainer').style.display = 'none'; }, 2000);
     }
 
-    // UI Helpers
+    function showDashboard(visible) {
+        const state = visible ? 'block' : 'none';
+        document.getElementById('pContainer').style.display = state;
+        document.getElementById('metricsBox').style.display = state;
+    }
+
     function updateStatus(text, bg = "#eee", color = "#333") {
         const b = document.getElementById('statusBadge');
         b.innerText = text; b.style.background = bg; b.style.color = color;
