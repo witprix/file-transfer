@@ -4,73 +4,91 @@
     <meta charset="UTF-8">
     <title>Robust Batch Transfer</title>
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <script src="https://unpkg.com/html5-qrcode"></script> <!-- Restored Library -->
     <style>
         body { font-family: sans-serif; padding: 20px; background: #f4f4f9; display: flex; justify-content: center; }
-        .card { background: white; padding: 24px; border-radius: 15px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); width: 100%; max-width: 400px; }
-        .progress-bar { height: 12px; background: #eee; border-radius: 6px; overflow: hidden; margin: 15px 0; }
+        .card { background: white; padding: 24px; border-radius: 15px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); width: 100%; max-width: 400px; text-align: center; }
+        .progress-bar { height: 12px; background: #eee; border-radius: 6px; overflow: hidden; margin: 15px 0; display: none; }
         #bar { height: 100%; background: #28a745; width: 0%; transition: width 0.1s; }
-        button { width: 100%; padding: 12px; margin: 5px 0; border: none; border-radius: 8px; background: #007bff; color: white; cursor: pointer; }
+        button { width: 100%; padding: 12px; margin: 8px 0; border: none; border-radius: 8px; background: #007bff; color: white; cursor: pointer; }
+        #reader { width: 100%; height: 250px; background: #000; margin-top: 10px; display: none; }
     </style>
 </head>
 <body>
 
 <div class="card">
-    <h3 id="status">Ready to Pair</h3>
+    <h3 id="status">Connecting...</h3>
+    <div id="qrcode"></div>
+    <div id="reader"></div>
+    
+    <!-- Restored UI Controls -->
+    <button id="scanBtn" onclick="startScanner()">Scan QR Code</button>
     <input type="file" id="folderInput" webkitdirectory directory multiple style="display:none">
     <button onclick="document.getElementById('folderInput').click()">Select Folder</button>
     <button id="sendBtn" style="background:#28a745">Start Transfer</button>
-    <div class="progress-bar"><div id="bar"></div></div>
+    
+    <div class="progress-bar" id="pContainer"><div id="bar"></div></div>
     <p id="stats"></p>
 </div>
 
 <script>
     let conn, peer = new Peer();
     let fileQueue = [];
-    const MAX_BUFFER = 1024 * 1024 * 4; // 4MB Buffer limit to prevent crashes
+    const MAX_BUFFER = 1024 * 1024 * 4; 
+    const html5QrCode = new Html5Qrcode("reader");
 
-    peer.on('open', id => document.getElementById('status').innerText = "Connected ID: " + id);
+    peer.on('open', id => document.getElementById('status').innerText = "Your ID: " + id);
     peer.on('connection', c => { conn = c; setupConnection(); });
 
+    // --- RESTORED SCANNER LOGIC ---
+    function startScanner() {
+        document.getElementById('reader').style.display = 'block';
+        html5QrCode.start({ facingMode: "environment" }, { fps: 10, qrbox: 250 }, 
+            (decodedText) => {
+                stopScanner();
+                conn = peer.connect(decodedText);
+                setupConnection();
+            });
+    }
+
+    function stopScanner() {
+        html5QrCode.stop();
+        document.getElementById('reader').style.display = 'none';
+    }
+    // ------------------------------
+
     function setupConnection() {
-        conn.on('data', (data) => {
-            // ACKNOWLEDGMENT: Only proceed if the receiver confirms receipt
-            if (data === 'ACK') window.readyForNextChunk = true;
-        });
+        document.getElementById('status').innerText = "Connected!";
+        conn.on('data', data => { if(data === 'ACK') window.ready = true; });
     }
 
     document.getElementById('folderInput').onchange = e => fileQueue = Array.from(e.target.files);
 
     document.getElementById('sendBtn').onclick = async () => {
-        if (!conn) return alert("No peer connected!");
-        const startTime = Date.now();
-        
+        if (!conn) return alert("Pair devices first!");
+        document.getElementById('pContainer').style.display = 'block';
         for (const file of fileQueue) {
-            // Signal: Start a new file
             conn.send({ type: 'start', name: file.webkitRelativePath, size: file.size });
             await streamFile(file);
         }
-        
-        document.getElementById('stats').innerText = `Batch Complete in ${((Date.now() - startTime)/1000).toFixed(2)}s`;
+        document.getElementById('stats').innerText = "Batch Complete!";
     };
 
     async function streamFile(file) {
         return new Promise(resolve => {
             const reader = new FileReader();
             let offset = 0;
-            const CHUNK = 65536; // 64KB
+            const CHUNK = 65536;
 
             const process = () => {
-                // BACKPRESSURE: Stop if buffer is full
                 if (conn.dataChannel.bufferedAmount > MAX_BUFFER) {
                     setTimeout(process, 10);
                     return;
                 }
-
                 reader.onload = e => {
                     conn.send({ type: 'data', chunk: e.target.result });
                     offset += e.target.result.byteLength;
                     document.getElementById('bar').style.width = `${(offset/file.size)*100}%`;
-
                     if (offset < file.size) {
                         reader.readAsArrayBuffer(file.slice(offset, offset + CHUNK));
                     } else {
